@@ -14,6 +14,7 @@ BIND_ADDRESS = ('localhost', 8080)
 BACKLOG_CONN = 1000
 NUMBER_WORKERS = 5
 DOCUMENT_ROOT = "/Users/user/PycharmProjects/otus_server"
+SAFE_DIR = "/httptest"
 
 HTTP_METHODS_ALLOWED = ['GET', 'HEAD']
 
@@ -48,40 +49,48 @@ parser.add_argument(
 )
 
 
-def parse_request(conn):
-    """ Read bytes by chunks received from a client and parse
-        request.
-        :param conn: client socket object
-        :return: HTTPRequest named tuple
-        """
-
+def read_request(conn):
+    """ Read bytes by chunks received from a client.
+            :param conn: client socket object
+            :return: data
+            """
     request_data = bytearray()
     headers_end = bytearray(b'\r\n\r\n')
 
     while True:
         data = conn.recv(1024)
         request_data += data
-        if headers_end == data[-4:] or not data:
+        if headers_end in data or not data:
             break
 
-    request_line = str(request_data, "iso-8859-1").strip()
+    return request_data
 
+
+def check_safe_url(safe_dir, target_url):
+    """ Checks that url is safe and targeting files within safe directory.
+        :param safe_dir: path to directory with shared files
+        :param target_url: url requested
+        :return: Boolean
+        """
+    match = os.path.abspath(target_url)
+    return safe_dir == os.path.commonpath([safe_dir, match])
+
+
+def parse_request(conn, data):
+    """ Parse request.
+        :param data: data in bytes
+        :return: HTTPRequest named tuple
+        """
+
+    request_line = str(data, "iso-8859-1").strip()
     parsed_data = request_line.split("\r\n")
 
     logging.info(
         f"Parsed request: {parsed_data}."
     )
-
     method, target, version = parsed_data[0].split()
 
-    # checks for directory traversal
-    if "../" in target:
-        send_error(conn, HTTPStatus.FORBIDDEN)
-
-    try:
-        target = urllib.parse.unquote(target)
-    except:
-        pass
+    target = urllib.parse.unquote(target)
 
     return HTTPRequest(method=method, target=target)
 
@@ -126,7 +135,7 @@ def send_response(conn, response):
     raw_response += b"\r\n\r\n" + response.body
 
     logging.info(
-        f"Response is ready to be send: {raw_response}."
+        f"Response is ready to be send."
     )
 
     conn.sendall(raw_response)
@@ -146,17 +155,26 @@ def handle_connection(conn, address, document_root):
     logging.info(
         f"Start to process request from {address[0]}, {address[1]}."
     )
+    data = read_request(conn)
 
-    request = parse_request(conn)
-    method = request.method
-    target = request.target
+    try:
+        request = parse_request(conn, data)
+        method = request.method
+        target = request.target
+    except ValueError:
+        return send_error(conn, HTTPStatus.BAD_REQUEST)
 
     if request.method not in HTTP_METHODS_ALLOWED:
         return send_error(conn, HTTPStatus.METHOD_NOT_ALLOWED)
 
+    # checks for directory traversal
+    if not check_safe_url(SAFE_DIR, target):
+        return send_error(conn, HTTPStatus.FORBIDDEN)
+
     target = target.partition("/")[-1].partition("?")[0]
 
     path = Path(os.path.join(document_root, target))
+
     path = Path(str(path).replace("%20", ' '))
 
     if path.is_dir():
